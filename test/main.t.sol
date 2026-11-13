@@ -1,243 +1,863 @@
+
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {Guess, GameStage, GameResult} from "../contracts/main.sol";
+import {Vm} from "forge-std/Vm.sol";
+
+import {
+    Guess,
+    GameStage,
+    GameResult
+} from "../contracts/main.sol";
 
 contract GuessTest is Test {
-    Guess guess;
+    Guess internal game;
 
-    address alice = address(0xA11CE);
-    address bob = address(0xB0B);
-    address carol = address(0xCA201);
+    address internal alice = address(0x1);
+    address internal bob = address(0x2);
+    address internal charlie = address(0x3);
+    address internal david = address(0x4);
 
-    event Result(address indexed player, GameResult indexed result);
+    uint256 internal constant DURATION = 1 days;
+
+    // =========================================================
+    // Setup
+    // =========================================================
 
     function setUp() public {
-        guess = new Guess();
+        game = new Guess();
     }
 
-    function _hash(
-        uint256 choice,
-        uint256 salt
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(choice, salt));
+    function _players2()
+        internal
+        view
+        returns (address[] memory players)
+    {
+        players = new address[](2);
+        players[0] = alice;
+        players[1] = bob;
+    }
+
+    function _players3()
+        internal
+        view
+        returns (address[] memory players)
+    {
+        players = new address[](3);
+        players[0] = alice;
+        players[1] = bob;
+        players[2] = charlie;
     }
 
     function _setup() internal {
-        address[2] memory players = [alice, bob];
-        guess.setupGame(players);
+        game.setupGame(_players2(), DURATION);
     }
 
-    function _chooseBoth(
-        uint256 ac,
-        uint256 bc,
-        uint256 xas,
-        uint256 bs
+    // =========================================================
+    // Commitment
+    // =========================================================
+
+    function _hash(
+        address player,
+        uint256 choice,
+        uint256 salt
+    ) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                choice,
+                salt,
+                player,
+                game.getGameId()
+            )
+        );
+    }
+
+    function _choose(
+    address player,
+    uint256 choice,
+    uint256 salt
+) internal {
+    bytes32 commitment = _hash(player, choice, salt);
+
+    vm.prank(player);
+
+    game.choose(commitment);
+}
+
+    function _commit(
+        address player,
+        uint256 choice,
+        uint256 salt
     ) internal {
+        vm.prank(player);
+
+        game.commit(choice, salt);
+    }
+
+    function _start2(
+        uint256 a,
+        uint256 b
+    ) internal {
+        _setup();
+
+        _choose(alice, a, 100);
+        _choose(bob, b, 200);
+    }
+
+    // =========================================================
+    // Event assertions
+    // =========================================================
+
+    function _assertResult(
+        Vm.Log[] memory logs,
+        uint256 index,
+        address player,
+        GameResult result
+    ) internal view {
+        assertTrue(index < logs.length);
+
+        assertEq(
+            logs[index].emitter,
+            address(game)
+        );
+
+        assertEq(
+            logs[index].topics.length,
+            3
+        );
+
+        assertEq(
+            logs[index].topics[0],
+            keccak256("Result(address,uint8,uint256)")
+        );
+
+        assertEq(
+            logs[index].topics[1],
+            bytes32(uint256(uint160(player)))
+        );
+
+        assertEq(
+            logs[index].topics[2],
+            bytes32(uint256(result))
+        );
+    }
+
+    function _assertTwoResults(
+        GameResult a,
+        GameResult b
+    ) internal {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 2);
+
+        _assertResult(logs, 0, alice, a);
+        _assertResult(logs, 1, bob, b);
+    }
+
+    // =========================================================
+    // 1. Initial state
+    // =========================================================
+
+    function testInitialState() public view {
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Available)
+        );
+
+        assertEq(game.getGameId(), 0);
+    }
+
+    function testSetupGame() public {
+        _setup();
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Gathering)
+        );
+
+        assertEq(game.getGameId(), 1);
+    }
+
+    function testSetupIncrementsGameId() public {
+        _start2(1, 3);
+
+        _commit(alice, 1, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 3, 200);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 2);
+
+        game.setupGame(_players2(), DURATION);
+
+        assertEq(game.getGameId(), 2);
+    }
+
+    function testRejectsSinglePlayer() public {
+        address[] memory players = new address[](1);
+        players[0] = alice;
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Amount of players must be greater than 1"
+            )
+        );
+
+        game.setupGame(players, DURATION);
+    }
+
+    function testRejectsZeroDeadline() public {
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Deadline must be greater than 0"
+            )
+        );
+
+        game.setupGame(_players2(), 0);
+    }
+
+    function testRejectsDuplicatePlayers() public {
+        address[] memory players = new address[](3);
+
+        players[0] = alice;
+        players[1] = bob;
+        players[2] = alice;
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Duplicate player"
+            )
+        );
+
+        game.setupGame(players, DURATION);
+    }
+
+    function testRejectsZeroAddress() public {
+        address[] memory players = new address[](2);
+
+        players[0] = alice;
+        players[1] = address(0);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Invalid player"
+            )
+        );
+
+        game.setupGame(players, DURATION);
+    }
+
+    function testCannotSetupDuringGame() public {
+        _setup();
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Game not available"
+            )
+        );
+
+        game.setupGame(_players2(), DURATION);
+    }
+
+    // =========================================================
+    // 2. Gathering
+    // =========================================================
+
+    function testChooseTransitionsStage() public {
+        _setup();
+
+        _choose(alice, 1, 100);
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Gathering)
+        );
+
+        _choose(bob, 2, 200);
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Committing)
+        );
+    }
+
+    function testRejectsUnauthorizedChoose() public {
+        _setup();
+
+        vm.prank(charlie);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Not invited"
+            )
+        );
+
+        game.choose(bytes32(uint256(1)));
+    }
+
+    function testRejectsZeroCommitment() public {
+        _setup();
+
         vm.prank(alice);
-        guess.choose(_hash(ac, xas));
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Can't commit 0 hash"
+            )
+        );
+
+        game.choose(bytes32(0));
+    }
+
+    function testCannotChooseTwice() public {
+        _setup();
+
+        _choose(alice, 1, 100);
+
+        bytes32 commitment = _hash(alice, 2, 200);
+
+vm.prank(alice);
+
+vm.expectRevert(
+    abi.encodeWithSignature(
+        "Error(string)",
+        "Your choice has been determined"
+    )
+);
+
+game.choose(commitment);
+    }
+
+    function testCannotChooseAfterGathering() public {
+        _start2(1, 3);
+
+        bytes32 commitment = _hash(alice, 2, 300);
+
+        vm.prank(alice);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Game not gathering"
+            )
+        );
+
+        game.choose(commitment);
+    }
+
+    // =========================================================
+    // 3. Commit
+    // =========================================================
+
+    function testRejectsUnauthorizedCommit() public {
+        _start2(1, 3);
+
+        vm.prank(charlie);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Not invited"
+            )
+        );
+
+        game.commit(1, 100);
+    }
+
+    function testRejectsInvalidChoice() public {
+        _start2(1, 3);
+
+        vm.prank(alice);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Invalid choice"
+            )
+        );
+
+        game.commit(0, 100);
+    }
+
+    function testRejectsChoiceGreaterThanThree() public {
+        _start2(1, 3);
+
+        vm.prank(alice);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Invalid choice"
+            )
+        );
+
+        game.commit(4, 100);
+    }
+
+    function testRejectsWrongSalt() public {
+        _start2(1, 3);
+
+        vm.prank(alice);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Not correct"
+            )
+        );
+
+        game.commit(1, 999);
+    }
+
+    function testRejectsWrongPlayerCommitment() public {
+        _start2(1, 3);
+
         vm.prank(bob);
-        guess.choose(_hash(bc, bs));
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Not correct"
+            )
+        );
+
+        game.commit(1, 100);
     }
 
-    function _assertStage(GameStage expected) internal view {
-        assertEq(uint256(guess.getStage()), uint256(expected));
+    function testCannotCommitTwice() public {
+        _start2(1, 3);
+
+        _commit(alice, 1, 100);
+
+        vm.prank(alice);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Your choice has been committed"
+            )
+        );
+
+        game.commit(1, 100);
     }
 
-    function test_SetupGame_EntersGathering() public {
-        _setup();
-        _assertStage(GameStage.Gathering);
-    }
-
-    function test_ChooseBoth_EntersCommitting() public {
+    function testCannotCommitBeforeCommitting() public {
         _setup();
 
         vm.prank(alice);
-        guess.choose(_hash(1, 11));
-        _assertStage(GameStage.Gathering);
 
-        vm.prank(bob);
-        guess.choose(_hash(2, 22));
-        _assertStage(GameStage.Committing);
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Game not committing"
+            )
+        );
+
+        game.commit(1, 100);
     }
 
-    function test_FirstCommit_StaysCommitting_SecondCommit_Settles() public {
+    // =========================================================
+    // 4. Two-player game results
+    // =========================================================
+
+    function testRockBeatsScissors() public {
+        _start2(1, 3);
+
+        _commit(alice, 1, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 3, 200);
+
+        _assertTwoResults(
+            GameResult.Win,
+            GameResult.Lose
+        );
+    }
+
+    function testPaperBeatsRock() public {
+        _start2(2, 1);
+
+        _commit(alice, 2, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 1, 200);
+
+        _assertTwoResults(
+            GameResult.Win,
+            GameResult.Lose
+        );
+    }
+
+    function testScissorsBeatsPaper() public {
+        _start2(3, 2);
+
+        _commit(alice, 3, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 2, 200);
+
+        _assertTwoResults(
+            GameResult.Win,
+            GameResult.Lose
+        );
+    }
+
+    function testRockDrawsRock() public {
+        _start2(1, 1);
+
+        _commit(alice, 1, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 1, 200);
+
+        _assertTwoResults(
+            GameResult.Equal,
+            GameResult.Equal
+        );
+    }
+
+    function testPaperDrawsPaper() public {
+        _start2(2, 2);
+
+        _commit(alice, 2, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 2, 200);
+
+        _assertTwoResults(
+            GameResult.Equal,
+            GameResult.Equal
+        );
+    }
+
+    function testScissorsDrawsScissors() public {
+        _start2(3, 3);
+
+        _commit(alice, 3, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 3, 200);
+
+        _assertTwoResults(
+            GameResult.Equal,
+            GameResult.Equal
+        );
+    }
+
+    // =========================================================
+    // 5. Fuzz testing
+    // =========================================================
+
+    function testFuzzTwoPlayerResults(
+        uint256 a,
+        uint256 b
+    ) public {
+        a = bound(a, 1, 3);
+        b = bound(b, 1, 3);
+
+        _start2(a, b);
+
+        _commit(alice, a, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, b, 200);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 2);
+
+        GameResult expectedA;
+        GameResult expectedB;
+
+        if (a == b) {
+            expectedA = GameResult.Equal;
+            expectedB = GameResult.Equal;
+        } else if (
+            (a == 1 && b == 3) ||
+            (a == 2 && b == 1) ||
+            (a == 3 && b == 2)
+        ) {
+            expectedA = GameResult.Win;
+            expectedB = GameResult.Lose;
+        } else {
+            expectedA = GameResult.Lose;
+            expectedB = GameResult.Win;
+        }
+
+        _assertResult(logs, 0, alice, expectedA);
+        _assertResult(logs, 1, bob, expectedB);
+    }
+
+    // =========================================================
+    // 6. Multi-player
+    // =========================================================
+
+    function testThreeDifferentChoicesDraw() public {
+        game.setupGame(_players3(), DURATION);
+
+        _choose(alice, 1, 100);
+        _choose(bob, 2, 200);
+        _choose(charlie, 3, 300);
+
+        _commit(alice, 1, 100);
+        _commit(bob, 2, 200);
+
+        vm.recordLogs();
+
+        _commit(charlie, 3, 300);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 3);
+
+        _assertResult(logs, 0, alice, GameResult.Equal);
+        _assertResult(logs, 1, bob, GameResult.Equal);
+        _assertResult(logs, 2, charlie, GameResult.Equal);
+    }
+
+    function testOneRevealerOthersLose() public {
+        game.setupGame(_players3(), DURATION);
+
+        _choose(alice, 1, 100);
+        _choose(bob, 2, 200);
+        _choose(charlie, 3, 300);
+
+        _commit(alice, 1, 100);
+
+        vm.warp(block.timestamp + DURATION);
+
+        vm.recordLogs();
+
+        game.checkDDL();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 3);
+
+        _assertResult(logs, 0, alice, GameResult.Equal);
+        _assertResult(logs, 1, bob, GameResult.Lose);
+        _assertResult(logs, 2, charlie, GameResult.Lose);
+    }
+
+    function testNoOneReveals() public {
+        _start2(1, 3);
+
+        vm.warp(block.timestamp + DURATION);
+
+        vm.recordLogs();
+
+        game.checkDDL();
+
+        _assertTwoResults(
+            GameResult.Lose,
+            GameResult.Lose
+        );
+    }
+
+    function testTwoRevealOneTimeout() public {
+        game.setupGame(_players3(), DURATION);
+
+        _choose(alice, 1, 100);
+        _choose(bob, 2, 200);
+        _choose(charlie, 3, 300);
+
+        _commit(alice, 1, 100);
+        _commit(bob, 2, 200);
+
+        vm.warp(block.timestamp + DURATION);
+
+        vm.recordLogs();
+
+        game.checkDDL();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 3);
+
+        _assertResult(logs, 0, alice, GameResult.Lose);
+        _assertResult(logs, 1, bob, GameResult.Win);
+        _assertResult(logs, 2, charlie, GameResult.Lose);
+    }
+
+    // =========================================================
+    // 7. Deadline
+    // =========================================================
+
+    function testDeadlineInclusive() public {
+        _start2(1, 3);
+
+        vm.warp(block.timestamp + DURATION);
+
+        vm.recordLogs();
+
+        game.checkDDL();
+
+        _assertTwoResults(
+            GameResult.Lose,
+            GameResult.Lose
+        );
+    }
+
+    function testCannotCheckDeadlineBeforeCommitting() public {
         _setup();
-        _chooseBoth(1, 2, 11, 22);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Game not committing"
+            )
+        );
+
+        game.checkDDL();
+    }
+
+    function testCannotCheckDeadlineBeforeExpiry() public {
+        _start2(1, 3);
+
+        vm.warp(block.timestamp + DURATION - 1);
+
+        game.checkDDL();
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Committing)
+        );
+    }
+
+    // =========================================================
+    // 8. Game reset
+    // =========================================================
+
+    function testCanStartNextGame() public {
+        _start2(1, 3);
+
+        _commit(alice, 1, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 3, 200);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(logs.length, 2);
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Available)
+        );
+
+        game.setupGame(_players2(), DURATION);
+
+        assertEq(game.getGameId(), 2);
+
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Gathering)
+        );
+    }
+
+    function testNewGameDoesNotReuseOldCommitment() public {
+        _start2(1, 3);
+
+        bytes32 oldHash = _hash(alice, 1, 100);
+
+        _commit(alice, 1, 100);
+
+        vm.recordLogs();
+
+        _commit(bob, 3, 200);
+
+        game.setupGame(_players2(), DURATION);
+
+        assertEq(game.getGameId(), 2);
 
         vm.prank(alice);
-        guess.commit(1, 11);
-        _assertStage(GameStage.Committing);
 
-        vm.expectEmit(true, true, false, true);
-        emit Result(alice, GameResult.Lose);
-        vm.expectEmit(true, true, false, true);
-        emit Result(bob, GameResult.Win);
+        game.choose(oldHash);
 
-        vm.prank(bob);
-        guess.commit(2, 22);
-
-        _assertStage(GameStage.Available);
-    }
-
-    function test_EqualChoice() public {
-        _setup();
-        _chooseBoth(2, 2, 11, 22);
+        _choose(bob, 3, 200);
 
         vm.prank(alice);
-        guess.commit(2, 11);
 
-        vm.expectEmit(true, true, false, true);
-        emit Result(alice, GameResult.Equal);
-        vm.expectEmit(true, true, false, true);
-        emit Result(bob, GameResult.Equal);
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Error(string)",
+                "Not correct"
+            )
+        );
 
-        vm.prank(bob);
-        guess.commit(2, 22);
+        game.commit(1, 100);
     }
 
-    function test_ThreeBeatsTwo_Player0Wins() public {
-        _setup();
-        _chooseBoth(3, 2, 11, 22);
+    // =========================================================
+    // 9. Independent instances
+    // =========================================================
 
-        vm.prank(alice);
-        guess.commit(3, 11);
+    function testIndependentInstances() public {
+        Guess anotherGame = new Guess();
 
-        vm.expectEmit(true, true, false, true);
-        emit Result(alice, GameResult.Win);
-        vm.expectEmit(true, true, false, true);
-        emit Result(bob, GameResult.Lose);
+        game.setupGame(_players2(), DURATION);
 
-        vm.prank(bob);
-        guess.commit(2, 22);
-    }
+        address[] memory players = new address[](2);
+        players[0] = charlie;
+        players[1] = david;
 
-    function test_TwoBeatsOne_Player1Wins() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
+        anotherGame.setupGame(players, DURATION);
 
-        vm.prank(alice);
-        guess.commit(1, 11);
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Gathering)
+        );
 
-        vm.expectEmit(true, true, false, true);
-        emit Result(alice, GameResult.Lose);
-        vm.expectEmit(true, true, false, true);
-        emit Result(bob, GameResult.Win);
+        assertEq(
+            uint256(anotherGame.getStage()),
+            uint256(GameStage.Gathering)
+        );
 
-        vm.prank(bob);
-        guess.commit(2, 22);
-    }
+        assertEq(game.getGameId(), 1);
+        assertEq(anotherGame.getGameId(), 1);
 
-    function test_Revert_InvalidChoice() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
+        _choose(alice, 1, 100);
 
-        vm.prank(alice);
-        vm.expectRevert(bytes("Invalid choice"));
-        guess.commit(4, 11);
-    }
+        bytes32 commitment = keccak256(
+    abi.encode(
+        uint256(3),
+        uint256(300),
+        charlie,
+        anotherGame.getGameId()
+    )
+);
 
-    function test_Revert_HashMismatch() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
+vm.prank(charlie);
 
-        vm.prank(alice);
-        vm.expectRevert(bytes("Not correct"));
-        guess.commit(1, 12);
-    }
+anotherGame.choose(commitment);
 
-    function test_Revert_NotInvited() public {
-        _setup();
+        assertEq(
+            uint256(game.getStage()),
+            uint256(GameStage.Gathering)
+        );
 
-        vm.prank(carol);
-        vm.expectRevert(bytes("Not invited"));
-        guess.choose(_hash(1, 1));
-
-        _chooseBoth(1, 2, 11, 22);
-
-        vm.prank(carol);
-        vm.expectRevert(bytes("Not invited"));
-        guess.commit(1, 1);
-    }
-
-    function test_Revert_StageMismatch() public {
-        _setup();
-
-        vm.prank(alice);
-        vm.expectRevert(bytes("Game not committing"));
-        guess.commit(1, 1);
-
-        _chooseBoth(1, 2, 11, 22);
-
-        vm.prank(alice);
-        vm.expectRevert(bytes("Game not gathering"));
-        guess.choose(_hash(1, 1));
-    }
-
-    function test_Revert_SetupGameWhenNotAvailable() public {
-        _setup();
-
-        address[2] memory players = [alice, bob];
-        vm.expectRevert(bytes("Game not available"));
-        guess.setupGame(players);
-    }
-
-    function test_CheckDDL_BeforeDeadline_NoSettle() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
-
-        vm.prank(alice);
-        guess.commit(1, 11);
-
-        guess.checkDDL();
-        _assertStage(GameStage.Committing);
-    }
-
-    function test_CheckDDL_AfterDeadline_SettlesMissingCommitAsLose() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
-
-        vm.prank(alice);
-        guess.commit(1, 11);
-
-        vm.warp(block.timestamp + 2 days + 1);
-
-        vm.expectEmit(true, true, false, true);
-        emit Result(alice, GameResult.Win);
-        vm.expectEmit(true, true, false, true);
-        emit Result(bob, GameResult.Lose);
-
-        guess.checkDDL();
-        _assertStage(GameStage.Available);
-    }
-
-    function test_Revert_CheckDDL_NotCommitting() public {
-        vm.expectRevert(bytes("Game not committing"));
-        guess.checkDDL();
-    }
-
-    function test_Restart_AfterSettlement() public {
-        _setup();
-        _chooseBoth(1, 2, 11, 22);
-
-        vm.prank(alice);
-        guess.commit(1, 11);
-        vm.prank(bob);
-        guess.commit(2, 22);
-
-        address[2] memory players = [bob, carol];
-        guess.setupGame(players);
-        _assertStage(GameStage.Gathering);
-    }
-
-    function test_DuplicateChoose_AdvancesCount() public {
-        _setup();
-
-        vm.prank(alice);
-        guess.choose(_hash(1, 11));
-        vm.prank(alice);
-        guess.choose(_hash(2, 22));
-
-        _assertStage(GameStage.Committing);
+        assertEq(
+            uint256(anotherGame.getStage()),
+            uint256(GameStage.Gathering)
+        );
     }
 }
