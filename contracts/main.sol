@@ -11,7 +11,8 @@ enum GameStage {
 enum GameResult {
     Win,
     Lose,
-    Equal
+    Equal,
+    Illegal
 }
 
 contract Guess {
@@ -25,9 +26,14 @@ contract Guess {
         uint256 DDL_LEN;
         bool lock;
         GameStage stage;
+        uint256 bond;
+        uint256 stake;
+        uint256[] toPay;
     }
 
     Room[] rooms;
+    address SakurakoujiLuna;
+    uint256 toLuna;
 
     event Result(
         address indexed player,
@@ -36,6 +42,13 @@ contract Guess {
     );
 
     error Busy();
+    error FailurePay();
+
+    constructor(address payable skrkj) {
+        require(skrkj != address(0), "Must specify a valid address.");
+        SakurakoujiLuna = skrkj;
+        toLuna = 0;
+    }
 
     modifier locker(uint256 roomId) {
         if (rooms[roomId].lock) revert Busy();
@@ -68,15 +81,20 @@ contract Guess {
 
     function setupGame(
         address[] calldata _players,
-        uint256 _DDL_LEN
+        uint256 _DDL_LEN,
+        uint256 bond,
+        uint256 stake
     ) public returns (uint256 newGameRoomId) {
         require(
             _players.length > 1,
             "Amount of players must be greater than 1"
         );
         require(_DDL_LEN > 0, "Deadline must be greater than 0");
+        require(bond > 0, "bond should be greater than 0");
+        require(stake > 0, "stake should be greater than 0");
+        require(bond > stake, "bond should be greater than stake");
 
-        // 天翼 2G 真是太快啦
+        // 天翼 2G 真是太快啦(O(n ^ 2))
         for (uint256 i = 0; i < _players.length; ++i) {
             require(_players[i] != address(0), "Invalid player");
             for (uint256 j = i + 1; j < _players.length; ++j) {
@@ -93,15 +111,21 @@ contract Guess {
             ref.hashes.push(bytes32(0));
             ref.choices.push(0);
             ref.results.push();
+            ref.toPay.push(0);
         }
 
         ref.DDL_LEN = _DDL_LEN;
 
         ref.lock = false;
+        ref.bond = bond;
+        ref.stake = stake;
         return rooms.length - 1;
     }
 
-    function choose(uint256 roomId, bytes32 choice) external locker(roomId) {
+    function choose(
+        uint256 roomId,
+        bytes32 choice
+    ) external payable locker(roomId) {
         require(
             rooms[roomId].stage == GameStage.Gathering,
             "Game not gathering"
@@ -112,6 +136,11 @@ contract Guess {
             "Your choice has been determined"
         );
         require(choice != 0, "Can't commit 0 hash");
+
+        require(
+            msg.value == rooms[roomId].bond + rooms[roomId].stake,
+            "Not accurately the number"
+        );
         rooms[roomId].hashes[player_id] = choice;
         rooms[roomId].curr_count++;
 
@@ -127,6 +156,7 @@ contract Guess {
         uint256 choice,
         bytes32 salt
     ) external locker(roomId) {
+        require(block.timestamp < rooms[roomId].DDL, "Too late.");
         require(
             rooms[roomId].stage == GameStage.Committing,
             "Game not committing"
@@ -151,14 +181,18 @@ contract Guess {
         }
     }
 
-    function checkDDL(uint256 roomId) external locker(roomId) {
+    function checkDDL(
+        uint256 roomId
+    ) external locker(roomId) returns (bool summarized) {
         require(
             rooms[roomId].stage == GameStage.Committing,
             "Game not committing"
         );
         if (rooms[roomId].DDL > 0 && block.timestamp >= rooms[roomId].DDL) {
             summarize(roomId);
+            summarized = true;
         }
+        return summarized;
     }
 
     function checkResult(uint256 roomId) private {
@@ -174,12 +208,16 @@ contract Guess {
             (counts[2] > 0 ? 1 : 0);
         if (positive_count == 0) {
             for (uint256 i = 0; i < getAmount(roomId); ++i) {
-                rooms[roomId].results[i] = GameResult.Equal;
+                rooms[roomId].results[i] = GameResult.Illegal;
             }
-        } else if (positive_count == 1 || positive_count == 3 || rooms[roomId].curr_count != getAmount(roomId)) {
+        } else if (
+            positive_count == 1 ||
+            positive_count == 3 ||
+            rooms[roomId].curr_count != getAmount(roomId)
+        ) {
             for (uint256 i = 0; i < getAmount(roomId); ++i) {
                 if (rooms[roomId].choices[i] == 0) {
-                    rooms[roomId].results[i] = GameResult.Lose;
+                    rooms[roomId].results[i] = GameResult.Illegal;
                 } else {
                     rooms[roomId].results[i] = GameResult.Equal;
                 }
@@ -218,13 +256,101 @@ contract Guess {
         }
     }
 
+    function calculate(uint256 roomId) private {
+        uint256 pool = 0;
+        uint256 count = 0;
+        uint256 count_equal = 0;
+        uint256 count_win = 0;
+        for (uint256 i = 0; i < getAmount(roomId); ++i) {
+            if (rooms[roomId].results[i] == GameResult.Illegal) {
+                pool += rooms[roomId].bond + rooms[roomId].stake;
+                ++count;
+            }
+            if (rooms[roomId].results[i] == GameResult.Equal) {
+                ++count_equal;
+            }
+            if (rooms[roomId].results[i] == GameResult.Win) {
+                ++count_win;
+            }
+        }
+        count = getAmount(roomId) - count;
+
+        if (count != 0 && count_equal == 0) {
+            pool = rooms[roomId].stake * getAmount(roomId);
+            uint256 bonus = pool / count_win;
+            uint256 remainder = pool % count_win;
+            toLuna += remainder;
+
+            for (uint256 i = 0; i < getAmount(roomId); ++i) {
+                if (rooms[roomId].results[i] == GameResult.Win) {
+                    rooms[roomId].toPay[i] = bonus + rooms[roomId].bond;
+                } else if (rooms[roomId].results[i] == GameResult.Lose) {
+                    rooms[roomId].toPay[i] = rooms[roomId].bond;
+                }
+            }
+        } else if (count == 0) {
+            // 不要白不要
+            toLuna =
+                toLuna +
+                getAmount(roomId) * (rooms[roomId].stake + rooms[roomId].bond);
+        } else {
+            uint256 bonus = pool / count;
+            uint256 remainder = pool % count;
+            toLuna += remainder;
+
+            for (uint256 i = 0; i < getAmount(roomId); ++i) {
+                if (rooms[roomId].results[i] != GameResult.Illegal) {
+                    rooms[roomId].toPay[i] =
+                        bonus +
+                        rooms[roomId].bond +
+                        rooms[roomId].stake;
+                }
+            }
+        }
+    }
+
     function summarize(uint256 roomId) private {
         checkResult(roomId);
         emitAll(roomId);
         rooms[roomId].stage = GameStage.Locked;
+        calculate(roomId);
+    }
+
+    function getMoney(uint256 roomId) external locker(roomId) {
+        require(rooms[roomId].stage == GameStage.Locked, "Game not locked");
+        uint256 player_id = invited(roomId);
+
+        uint256 tmp = rooms[roomId].toPay[player_id];
+        require(tmp > 0, "No money for you");
+        rooms[roomId].toPay[player_id] = 0;
+
+        (bool ok, ) = payable(msg.sender).call{value: tmp}("");
+
+        if (!ok) {
+            revert FailurePay();
+        }
+    }
+
+    function getLunaMoney() external {
+        require(msg.sender == SakurakoujiLuna, "Who are you");
+        uint256 tmp = toLuna;
+        toLuna = 0;
+        (bool ok, ) = payable(SakurakoujiLuna).call{value: tmp}("");
+        if (!ok) {
+            revert FailurePay();
+        }
     }
 
     function getStage(uint256 roomId) external view returns (GameStage) {
         return rooms[roomId].stage;
+    }
+
+    function getHash(
+        uint256 choice,
+        bytes32 salt,
+        address sender,
+        uint256 roomId
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encode(choice, salt, sender, roomId));
     }
 }
