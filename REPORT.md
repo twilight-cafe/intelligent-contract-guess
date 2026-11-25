@@ -1,11 +1,16 @@
+[GitHub](https://github.com/twilight-cafe/intelligent-contract-guess)
+
 # 猜拳游戏合约
 
-## 功能：
+## 概述
 
-1. 支持多人游戏。
+这是一个安全公平平等的猜拳游戏。
+
+1. 支持多人游戏（任意人数，但是不建议太多）（胜负规则针对多人情况进行了针对性修改）。
 2. 支持多房间游戏，不同房间互不干扰。
-3. 链上仅存储选项哈希，全部玩家提交后再揭露。DDL 后揭露的视为非法玩家。
+3. 链上仅存储选项哈希（含盐，盐由玩家指定，可以是随机字符串，除此之外还含有链 id 等信息），全部玩家提交后再揭露。DDL 后揭露的视为非法玩家。
 4. 支持添加押金。
+5. 支持向 constructor 调用者 donate。
 
 ## Git 迭代记录
 
@@ -44,9 +49,11 @@ Date:   Fri Nov 13 22:21:08 2026 +0800
     3. 玩家全部提交加盐哈希值后再统一揭露真实选项。固定时间后未揭露的视为失败。
 ```
 
-## 接口与使用方法
+## 代码设计
 
-- `constructor(address payable skrkj)`：负责收各种各样的钱，例如粉尘余额，或者所有玩家都不揭露时的友情赠送。
+源代码采用**古法编程**，单元测试由 AI 生成。
+
+- `constructor(address payable skrkj)`：负责收各种各样的钱，例如粉尘余额，或者所有玩家都不揭露时的 donate 对象。
 - `function setupGame(
           address[] calldata _players,// 玩家列表
           uint256 _DDL_LEN, // DDL
@@ -77,68 +84,37 @@ Date:   Fri Nov 13 22:21:08 2026 +0800
            uint256 roomId
        ) external pure returns (bytes32)`：计算哈希结果的辅助函数，本地调试时用。不应该在链上调用。
 
-## 结局计算方法与安全性
+## 安全性分析
 
-相关函数如下：
+### 猜拳结果认定
 
-```solidity
-function checkResult(uint256 roomId) private {
-        uint256[3] memory counts;
-        for (uint256 i = 0; i < getAmount(roomId); ++i) {
-            if (rooms[roomId].choices[i] != 0) {
-                counts[rooms[roomId].choices[i] - 1]++;
-            }
-        }
+- 若全员超时：视为 donate，所有钱留给 constructor 调用者。
+- 若有人未揭露：平局。虽然有人未揭露也可以计算余下的玩家的游戏结果并计算出胜负，但是此时恶意玩家可以创建小号，做不同的选择并在其他人全部揭露后，视情况揭露其中的一个小号的结果，从而实现盈利，只需要获胜所得大于押金即可持续盈利，这不安全，故但凡有玩家未揭露，则已经揭露者平局。
+- 若猜拳种类数为 $1$ 或者 $3$：平局，所有人平分钱。
+- 若猜拳种类数为 $2$：按照 $3$ 胜 $2$，$2$ 胜 $1$，$1$ 胜 $3$ 顺序判断胜负。
 
-        uint256 positive_count = (counts[0] > 0 ? 1 : 0) +
-            (counts[1] > 0 ? 1 : 0) +
-            (counts[2] > 0 ? 1 : 0);
-        if (positive_count == 0) {
-            for (uint256 i = 0; i < getAmount(roomId); ++i) {
-                rooms[roomId].results[i] = GameResult.Illegal;
-            }
-        } else if (
-            positive_count == 1 ||
-            positive_count == 3 ||
-            rooms[roomId].curr_count != getAmount(roomId)
-        ) {
-            for (uint256 i = 0; i < getAmount(roomId); ++i) {
-                if (rooms[roomId].choices[i] == 0) {
-                    rooms[roomId].results[i] = GameResult.Illegal;
-                } else {
-                    rooms[roomId].results[i] = GameResult.Equal;
-                }
-            }
-        } else {
-            // Win
-            uint256 ch1 = counts[0] > 0 ? 1 : 2;
-            // Lose
-            uint256 ch2 = counts[2] > 0 ? 3 : 2;
-            if (ch1 == ch2 - 1) {
-                uint256 ch_tmp = ch1;
-                ch1 = ch2;
-                ch2 = ch_tmp;
-            }
+### 奖金分配
 
-            for (uint256 i = 0; i < getAmount(roomId); ++i) {
-                if (
-                    rooms[roomId].choices[i] == 0 ||
-                    rooms[roomId].choices[i] == ch2
-                ) {
-                    rooms[roomId].results[i] = GameResult.Lose;
-                } else {
-                    rooms[roomId].results[i] = GameResult.Win;
-                }
-            }
-        }
-    }
-```
+- 粉尘余额以及 donation 收给 constructor。
+- 平局拿回自己的钱。
+- 所有胜者平分所有败者的押注（和自己的押金和押注），但是败者可以取回押金。
 
-若 `positive_count` 为 $0$ 表示全员超时。视为向合约创建者友情送钱。
+### 并发安全
 
-若参与者选项种类数为 $1$ 或者 $3$，或者有人未揭露，则平局，所有合法玩家平分非法玩家的钱。虽然有人未揭露也可以计算余下的玩家的游戏结果并计算出胜负，但是恶意玩家可以创建小号，做不同的选择并在其他人全部揭露后，视情况揭露其中的一个小号的结果，从而实现盈利，只需要获胜所得大于押金即可持续盈利，这不好。
+- 主要外部函数均含 `modifier locker`，遇到锁会直接 `revert`，避免多人同时操作。
 
-若所有人均揭露，并且选项种类数为 $2$，则判断胜负。$3$ 胜 $2$，$2$ 胜 $1$，$1$ 胜 $3$。
+### 信息安全
+
+- 揭露前采用哈希存储选择：` keccak256(abi.encode(choice, salt, msg.sender, roomId)`。
+
+## 部署过程
+
+Remix + Metamask 直接部署（合约地址：`0xe97C49FD6169428028Cf577F003Aa09A4b6DBDed`）。
+
+## 测试与分析
+
+- 利用单元测试框架自动测试（test/main.t.sol）。
+- 手动测试。
 
 ##  AI 辅助
 
@@ -146,8 +122,6 @@ function checkResult(uint256 roomId) private {
 2. 编写单元测试等测试文件。
 3. 创建项目其他文件，如 `hardhat.config.ts`。
 
-源文件（main.sol）独立完成，未经由 AI 修改。
-
 ## 项目源码
 
-项目仓库在被删除前可在[Link](https://github.com/twilight-cafe/intelligent-contract-guess)访问。
+项目仓库暂时可在 [Link](https://github.com/twilight-cafe/intelligent-contract-guess) 访问。

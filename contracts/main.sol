@@ -90,7 +90,7 @@ contract Guess {
             "Amount of players must be greater than 1"
         );
         require(_DDL_LEN > 0, "Deadline must be greater than 0");
-        require(bond > 0, "bond should be greater than 0");
+        require(bond > 1, "bond should be greater than 1");
         require(stake > 0, "stake should be greater than 0");
         require(bond > stake, "bond should be greater than stake");
 
